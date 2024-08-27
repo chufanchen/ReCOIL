@@ -1,4 +1,4 @@
-# ReCOIL - Imitation Learning from expert data and suboptimal offline data.
+# ReCOIL - Imitation Learning from expert data + suboptimal offline data.
 
 ## How to run the code
 

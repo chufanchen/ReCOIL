@@ -5,20 +5,16 @@ from typing import Tuple
 import datetime
 import gym
 import numpy as np
-import tqdm
 import time
-import absl
-import sys
 from absl import app, flags
 from ml_collections import config_flags
-from tensorboardX import SummaryWriter
 from dataclasses import dataclass
 
 import wrappers
+import ipdb;ipdb.set_trace()
 from dataset_utils import D4RLDataset,D4RLMixedDataset, split_into_trajectories
 from evaluation import evaluate, evaluate_ant
 from learner_imitate import Learner
-import warnings
 from logging_utils.logx import EpochLogger
 import envs
 os.environ['WANDB_DISABLED'] = 'true' 
@@ -188,17 +184,7 @@ def make_env_and_dataset(env_name: str,
         expert_env = wrappers.EpisodeMonitor(expert_env)
         expert_env = wrappers.SinglePrecision(expert_env)
         expert_dataset = D4RLDataset(expert_env, transitions=200)
-    elif "antmaze" in env_name:
-        expert_env = gym.make(f"antmaze-umaze-v2")
-        expert_env = wrappers.EpisodeMonitor(expert_env)
-        expert_env = wrappers.SinglePrecision(expert_env)
-        expert_dataset = D4RLDataset(expert_env, transitions=700, env_name = env_name)
-    elif "Grid" in env_name:
-        expert_env = gym.make(f"GoalGrid-v0")
-        expert_env = wrappers.EpisodeMonitor(expert_env)
-        expert_env = wrappers.SinglePrecision(expert_env)
-        expert_dataset = D4RLDataset(expert_env, transitions=5, env_name = env_name)
-    
+
 
     offline_min=None
     offline_max=None
@@ -235,16 +221,11 @@ def main(_):
 
     ts_str = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d_%H-%M-%S")
     save_dir = os.path.join(FLAGS.save_dir, ts_str)
-    exp_id = f"results/offline_imitation2/{FLAGS.env_name}/" + FLAGS.exp_name
+    exp_id = f"results/offline_imitation/{FLAGS.env_name}/" + FLAGS.exp_name
     log_folder = exp_id + '/'+FLAGS.exp_name+'_s'+str(FLAGS.seed) 
     logger_kwargs={'output_dir':log_folder, 'exp_name':FLAGS.exp_name}
     e_logger = EpochLogger(**logger_kwargs)
 
-    hparam_str_dict = dict(seed=FLAGS.seed, env=FLAGS.env_name)
-    hparam_str = ','.join([
-        '%s=%s' % (k, str(hparam_str_dict[k]))
-        for k in sorted(hparam_str_dict.keys())
-    ])
 
     os.makedirs(save_dir, exist_ok=True)
 
@@ -298,10 +279,6 @@ def main(_):
             e_logger.dump_tabular()
             eval_returns.append((i, eval_stats['return']))
             print("Iterations: {} Average Return: {}".format(i,eval_stats['return']))
-
-    sys.exit(0)
-    os._exit(0)
-    raise SystemExit
 
 
 if __name__ == '__main__':

@@ -13,7 +13,6 @@ import value_net
 from actor import update_imitate as awr_update_actor
 from common import Batch, MixedBatch, InfoDict, Model, PRNGKey
 from critic_imitate import update_q_imitate, update_v_imitate
-# from dual_critic import update_q_dual, update_v_dual
 
 from functools import partial
 
@@ -43,7 +42,7 @@ def _update_jit(
     key, rng = jax.random.split(rng)
     for i in range(args.num_v_updates):
         new_value, value_info = update_v_imitate(target_critic, value, combined_batch,is_expert_mask, expectile, loss_temp, alpha,beta, double, vanilla, key, args)
-        # value = new_value # TODO: change by HS for parity with IQL_pytorch
+        # value = new_value # TODO: parity with IQL_pytorch
     new_actor, actor_info = awr_update_actor(key, actor, target_critic,
                                              new_value, combined_batch,is_expert_mask, temperature, double)
 

@@ -144,10 +144,10 @@ def update_v_recoil(critic: Model, value: Model, batch: Batch, is_expert_mask,
 def update_q_imitate(critic: Model, target_value: Model, batch: Batch, is_expert_mask,
              discount: float, double: bool, key: PRNGKey, loss_temp: float, args) -> Tuple[Model, InfoDict]:
     next_v = target_value(batch.next_observations)
-    ###### LSIQ stability trick!
-    target_q_imitate = -2 + discount * batch.masks * next_v + discount * (1-batch.masks) * (-200)
-    # target_q_imitate = -10 + discount * batch.masks * next_v + discount * (1-batch.masks) * (-1000)
-    # target_q_imitate = 0 + discount * batch.masks * next_v + discount * (1-batch.masks) * (0)
+    ###### LSIQ stability trick! see https://arxiv.org/abs/2303.00599
+    reward_gap = 2
+    target_Q_gap = 200
+    target_q_imitate = -reward_gap + discount * batch.masks * next_v + discount * (1-batch.masks) * (-target_Q_gap)
     target_q = target_q_imitate
     def critic_loss_fn(critic_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         acts = batch.actions
@@ -164,15 +164,14 @@ def update_q_imitate(critic: Model, target_value: Model, batch: Batch, is_expert
 
             return loss.mean(), loss_dict
 
-        def ls_iq_loss(q,q_target,*args):
+        def fixed_target_loss(q,q_target,*args):
             loss_dict = {}
-            loss = 0.5*(q[q.shape[0]//2:]-200)**2+0.5*(q[:q.shape[0]//2]-q_target[:q.shape[0]//2])**2
+            loss = 0.5*(q[q.shape[0]//2:]-target_Q_gap)**2+0.5*(q[:q.shape[0]//2]-q_target[:q.shape[0]//2])**2
             loss_dict['critic_loss'] = loss.mean()
 
             return loss.mean(), loss_dict
         
-        # critic_loss = mse_loss
-        critic_loss = ls_iq_loss #mse_loss
+        critic_loss = fixed_target_loss
 
         if double:
             loss1, dict1 = critic_loss(q1, target_q, v, loss_temp)
@@ -183,11 +182,9 @@ def update_q_imitate(critic: Model, target_value: Model, batch: Batch, is_expert
                 dict1[k] += v
             loss_dict = dict1
         else:
-            # critic_loss, loss_dict = dual_q_loss(q1, target_q, v, loss_temp)
             critic_loss, loss_dict = critic_loss(q1, target_q,  v, loss_temp)
 
         if args.grad_pen:
-            # print("Using grad_pen")
             lambda_ =args.lambda_gp
             q1_grad, q2_grad = grad_norm(critic, critic_params, batch.observations, acts)
             loss_dict['q1_grad'] = q1_grad.mean()
