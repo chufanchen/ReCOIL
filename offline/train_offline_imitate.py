@@ -1,6 +1,5 @@
 import os
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
-from jax.config import config
 from typing import Tuple
 import datetime
 import gym
@@ -9,15 +8,11 @@ import time
 from absl import app, flags
 from ml_collections import config_flags
 from dataclasses import dataclass
-
 import wrappers
-import ipdb;ipdb.set_trace()
 from dataset_utils import D4RLDataset,D4RLMixedDataset, split_into_trajectories
 from evaluation import evaluate, evaluate_ant
 from learner_imitate import Learner
 from logging_utils.logx import EpochLogger
-import envs
-os.environ['WANDB_DISABLED'] = 'true' 
 
 
 FLAGS = flags.FLAGS
@@ -190,23 +185,10 @@ def make_env_and_dataset(env_name: str,
     offline_max=None
     if 'walker2d' in env_name:
         if FLAGS.expert_trajectories==200:
-            expert_trajs = 100
+            expert_trajs = 100 # Following protocol from the SMODICE paper
         else:
             expert_trajs = FLAGS.expert_trajectories
-        dataset = D4RLMixedDataset(env, expert_env, expert_trajectories=expert_trajs,env_name=env_name)
-    elif 'Grid' in env_name:
-        dataset = D4RLMixedDataset(env, expert_env, expert_trajectories=1,env_name=env_name)
-    elif 'antmaze' in env_name:
-        if FLAGS.expert_trajectories==200:
-            expert_trajs = 3000
-        else:
-            expert_trajs = FLAGS.expert_trajectories
-        dataset = D4RLMixedDataset(env, expert_env, expert_trajectories=expert_trajs,env_name="antmaze")
-        offline_min = dataset.observations[:,:2].min(axis=0)
-        offline_max = dataset.observations[:,:2].max(axis=0)
-        expert_dataset.observations[:,:2] = (expert_dataset.observations[:,:2]-dataset.observations[:,:2].min(axis=0))/(dataset.observations[:,:2].max(axis=0)-dataset.observations[:,:2].min(axis=0))
-        dataset.observations[:,:2] = (dataset.observations[:,:2]-dataset.observations[:,:2].min(axis=0))/(dataset.observations[:,:2].max(axis=0)-dataset.observations[:,:2].min(axis=0))
-        
+        dataset = D4RLMixedDataset(env, expert_env, expert_trajectories=expert_trajs,env_name=env_name) 
     elif 'kitchen' not in env_name:
         dataset = D4RLMixedDataset(env, expert_env, expert_trajectories=FLAGS.expert_trajectories,env_name=env_name)
     else:

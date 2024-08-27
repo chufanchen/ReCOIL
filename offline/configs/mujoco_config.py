@@ -15,7 +15,7 @@ def get_config():
     config.expectile = 0.7  # The actual tau for expectiles.
     config.temperature = 3.0
     config.dropout_rate = 0.0
-    config.layernorm = False #True
+    config.layernorm = False # Some environments like walker and halfcheetah benefit from layernorm.
 
     config.tau = 0.005  # For soft target updates.
 

@@ -95,7 +95,6 @@ class Learner(object):
         self.alpha = alpha
         self.beta=beta
         self.args = args
-        # actor_lr = 3e-5
         rng = jax.random.PRNGKey(seed)
         rng, actor_key, critic_key, value_key = jax.random.split(rng, 4)
 

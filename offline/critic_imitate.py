@@ -33,11 +33,9 @@ def expectile_loss_imitate(diff,v, beta, expectile=0.8):
     return  (weight * (diff**2))[:v.shape[0]//2].mean() + beta*(v[:v.shape[0]//2]-v[v.shape[0]//2:]).mean()
 
 
-
 def expectile_loss(diff, expectile=0.8):
     weight = jnp.where(diff > 0, expectile, (1 - expectile))
     return weight * (diff**2)
-
 
 
 def update_v_imitate(critic: Model, value: Model, batch: Batch, is_expert_mask,
