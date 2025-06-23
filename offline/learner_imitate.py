@@ -57,6 +57,55 @@ def _update_jit(
     }
 
 
+def compute_rewards(agent, batch: Batch, num_samples: int = 10) -> jnp.ndarray:
+    """Computes rewards for a batch of transitions."""
+
+    @jax.jit
+    def _get_rewards(
+        actor_params: jnp.ndarray,
+        critic_params: jnp.ndarray,
+        rng: PRNGKey,
+        observations: jnp.ndarray,
+        actions: jnp.ndarray,
+        next_observations: jnp.ndarray,
+    ) -> Tuple[jnp.ndarray, PRNGKey]:
+        # Compute Q(s, a)
+        q1_s_a, q2_s_a = agent.critic.apply_fn.apply({'params': critic_params}, observations, actions)
+        q_s_a = jnp.minimum(q1_s_a, q2_s_a)
+
+        # Compute E[Q(s', a')]
+        dist = agent.actor.apply_fn.apply({'params': actor_params}, next_observations)
+        rng, key = jax.random.split(rng)
+        
+        # Sample multiple actions for each next_observation
+        a_primes = dist.sample(seed=key, sample_shape=num_samples)  # (num_samples, batch_size, action_dim)
+
+        # Reshape for batch computation
+        batch_size = next_observations.shape[0]
+        action_dim = a_primes.shape[-1]
+        obs_dim = next_observations.shape[-1]
+        
+        s_prime_tiled = jnp.tile(next_observations, (num_samples, 1)) # (num_samples * batch_size, obs_dim)
+        a_primes_reshaped = jnp.reshape(a_primes, (num_samples * batch_size, action_dim))
+
+        q1_s_prime, q2_s_prime = agent.critic.apply_fn.apply({'params': critic_params}, s_prime_tiled, a_primes_reshaped)
+        q_s_prime = jnp.minimum(q1_s_prime, q2_s_prime)
+        
+        q_s_prime_reshaped = q_s_prime.reshape(num_samples, batch_size)
+        expected_q = q_s_prime_reshaped.mean(axis=0)
+
+        rewards = q_s_a - agent.discount * expected_q
+
+        return rewards, rng
+
+    rewards, new_rng = _get_rewards(
+        agent.actor.params, agent.critic.params, agent.rng,
+        batch.observations, batch.actions, batch.next_observations
+    )
+    agent.rng = new_rng
+    return rewards
+
+
 class Learner(object):
     def __init__(self,
                  seed: int,

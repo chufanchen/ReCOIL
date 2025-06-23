@@ -68,8 +68,14 @@ def _sample_actions(rng: PRNGKey,
                     actor_def: nn.Module,
                     actor_params: Params,
                     observations: np.ndarray,
-                    temperature: float = 1.0) -> Tuple[PRNGKey, jnp.ndarray]:
-    dist = actor_def.apply({'params': actor_params}, observations, temperature)
+                    temperature: float = 1.0,
+                    distribution: str = 'log_prob') -> Tuple[PRNGKey, jnp.ndarray]:
+    if distribution == 'det':
+        return rng, actor_def.apply({'params': actor_params}, observations,
+                                   temperature)
+    else:
+        dist = actor_def.apply({'params': actor_params}, observations,
+                              temperature)
     rng, key = jax.random.split(rng)
     return rng, dist.sample(seed=key)
 
