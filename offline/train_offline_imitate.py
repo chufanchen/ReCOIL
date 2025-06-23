@@ -5,14 +5,17 @@ import datetime
 import gym
 import numpy as np
 import time
+import pickle
+import collections
 from absl import app, flags
 from ml_collections import config_flags
 from dataclasses import dataclass
 import wrappers
-from dataset_utils import D4RLDataset,D4RLMixedDataset, split_into_trajectories
+from dataset_utils import D4RLDataset, D4RLMixedDataset, split_into_trajectories
 from evaluation import evaluate, evaluate_ant
-from learner_imitate import Learner
+from learner_imitate import Learner, compute_rewards
 from logging_utils.logx import EpochLogger
+from common import Batch, MixedBatch
 
 
 FLAGS = flags.FLAGS
@@ -199,6 +202,109 @@ def make_env_and_dataset(env_name: str,
     return env, dataset, expert_dataset, offline_min, offline_max
 
 
+def process_dataset_with_learned_rewards(dataset, agent, batch_size=1024):
+    """Process the entire dataset with learned rewards."""
+    # Create a copy of the dataset dictionary to modify
+    dataset_dict = {
+        'observations': dataset.observations.copy(),
+        'actions': dataset.actions.copy(),
+        'rewards': np.zeros_like(dataset.rewards),  # Will replace with learned rewards
+        'masks': dataset.masks.copy(),
+        'dones_float': dataset.dones_float.copy(),
+        'next_observations': dataset.next_observations.copy()
+    }
+    
+    total_entries = len(dataset.observations)
+    num_batches = (total_entries + batch_size - 1) // batch_size  # Ceiling division
+    
+    print(f"Processing dataset with {total_entries} entries in {num_batches} batches...")
+    
+    # Process the dataset sequentially in batches
+    for i in range(num_batches):
+        start_idx = i * batch_size
+        end_idx = min(start_idx + batch_size, total_entries)
+        
+        # Create batch using Batch namedtuple
+        if hasattr(dataset, 'is_expert'):  # Check if it's a MixedDataset
+            batch = MixedBatch(
+                observations=dataset.observations[start_idx:end_idx],
+                actions=dataset.actions[start_idx:end_idx],
+                rewards=dataset.rewards[start_idx:end_idx],
+                masks=dataset.masks[start_idx:end_idx],
+                next_observations=dataset.next_observations[start_idx:end_idx],
+                is_expert=dataset.is_expert[start_idx:end_idx] if hasattr(dataset, 'is_expert') else None
+            )
+        else:
+            batch = Batch(
+                observations=dataset.observations[start_idx:end_idx],
+                actions=dataset.actions[start_idx:end_idx],
+                rewards=dataset.rewards[start_idx:end_idx],
+                masks=dataset.masks[start_idx:end_idx],
+                next_observations=dataset.next_observations[start_idx:end_idx]
+            )
+        
+        # Compute learned rewards for this batch
+        learned_batch_rewards = compute_rewards(agent, batch)
+        
+        # Store the learned rewards
+        dataset_dict['rewards'][start_idx:end_idx] = learned_batch_rewards
+        
+        if (i + 1) % 10 == 0 or i == num_batches - 1:
+            print(f"Processed batch {i+1}/{num_batches}")
+    
+    return dataset_dict
+
+
+def format_dataset_as_trajectories(dataset_dict):
+    """Format the dataset into a list of trajectories (episodes)."""
+    N = dataset_dict['rewards'].shape[0]
+    data_ = collections.defaultdict(list)
+    
+    episode_step = 0
+    paths = []
+    
+    use_timeouts = False
+    terminals = 1.0 - dataset_dict['masks']  # masks = 1.0 - terminals in our dataset
+    
+    print(f"Formatting dataset with {N} transitions into trajectories...")
+    
+    for i in range(N):
+        done_bool = bool(terminals[i])
+        final_timestep = False  # We don't have timeout info, using only terminal flags
+        
+        for k in ['observations', 'actions', 'rewards']:
+            data_[k].append(dataset_dict[k][i])
+        
+        # Add terminal flag
+        data_['terminals'].append(terminals[i])
+        
+        if done_bool or final_timestep:
+            episode_step = 0
+            episode_data = {}
+            for k in data_:
+                episode_data[k] = np.array(data_[k])
+            paths.append(episode_data)
+            data_ = collections.defaultdict(list)
+        else:
+            episode_step += 1
+            
+    # Handle any remaining data (if the last trajectory was incomplete)
+    if len(data_['rewards']) > 0:
+        episode_data = {}
+        for k in data_:
+            episode_data[k] = np.array(data_[k])
+        paths.append(episode_data)
+    
+    returns = np.array([np.sum(p['rewards']) for p in paths])
+    num_samples = np.sum([p['rewards'].shape[0] for p in paths])
+    
+    print(f'Number of samples collected: {num_samples}')
+    print(f'Number of trajectories: {len(paths)}')
+    print(f'Trajectory returns: mean = {np.mean(returns)}, std = {np.std(returns)}, max = {np.max(returns)}, min = {np.min(returns)}')
+    
+    return paths
+
+
 def main(_):
 
     ts_str = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d_%H-%M-%S")
@@ -251,6 +357,7 @@ def main(_):
             if eval_stats['return'] >= best_eval_returns:
                 # Store best eval returns
                 best_eval_returns = eval_stats['return']
+                agent.save(os.path.join(save_dir, f'{FLAGS.seed}', f'best'))
             e_logger.log_tabular('Iterations', i)
             e_logger.log_tabular('AverageNormalizedReturn', eval_stats['return'])
             e_logger.log_tabular('UnseenExpertV', update_info['unseen_v_expert'].item())
@@ -262,6 +369,41 @@ def main(_):
             eval_returns.append((i, eval_stats['return']))
             print("Iterations: {} Average Return: {}".format(i,eval_stats['return']))
 
+    print(f"Training finished. Best eval return: {best_eval_returns}")
+    print("Computing learned rewards and replacing the ground truth rewards in the D4RL dataset...")
+    
+    # Process the entire dataset with learned rewards
+    modified_dataset = process_dataset_with_learned_rewards(dataset, agent, FLAGS.batch_size)
+    
+    # Create a meaningful filename based on environment name
+    env_name_parts = FLAGS.env_name.split('-')
+    if len(env_name_parts) >= 2:
+        output_filename = f"{env_name_parts[0]}_{env_name_parts[1]}_proxy_reward.pkl"
+    else:
+        output_filename = f"{FLAGS.env_name}_proxy_reward.pkl"
+    
+    # Save the dataset with learned rewards
+    with open(output_filename, 'wb') as f:
+        pickle.dump(modified_dataset, f)
+    
+    print(f"Dataset with learned rewards saved to {output_filename}")
+    
+    # Sample statistics about the learned rewards
+    print(f"Learned rewards statistics:")
+    print(f"  Min: {modified_dataset['rewards'].min()}")
+    print(f"  Max: {modified_dataset['rewards'].max()}")
+    print(f"  Mean: {modified_dataset['rewards'].mean()}")
+    print(f"  Std: {modified_dataset['rewards'].std()}")
+
+    # Format the dataset as trajectories
+    formatted_dataset = format_dataset_as_trajectories(modified_dataset)
+    
+    # Save the formatted dataset
+    formatted_filename = f"{FLAGS.env_name}.pkl"
+    with open(formatted_filename, 'wb') as f:
+        pickle.dump(formatted_dataset, f)
+    
+    print(f"Formatted dataset saved to {formatted_filename}")
 
 if __name__ == '__main__':
     app.run(main)
