@@ -375,19 +375,6 @@ def main(_):
     # Process the entire dataset with learned rewards
     modified_dataset = process_dataset_with_learned_rewards(dataset, agent, FLAGS.batch_size)
     
-    # Create a meaningful filename based on environment name
-    env_name_parts = FLAGS.env_name.split('-')
-    if len(env_name_parts) >= 2:
-        output_filename = f"{env_name_parts[0]}_{env_name_parts[1]}_proxy_reward.pkl"
-    else:
-        output_filename = f"{FLAGS.env_name}_proxy_reward.pkl"
-    
-    # Save the dataset with learned rewards
-    with open(output_filename, 'wb') as f:
-        pickle.dump(modified_dataset, f)
-    
-    print(f"Dataset with learned rewards saved to {output_filename}")
-    
     # Sample statistics about the learned rewards
     print(f"Learned rewards statistics:")
     print(f"  Min: {modified_dataset['rewards'].min()}")
@@ -399,7 +386,7 @@ def main(_):
     formatted_dataset = format_dataset_as_trajectories(modified_dataset)
     
     # Save the formatted dataset
-    formatted_filename = f"{FLAGS.env_name}.pkl"
+    formatted_filename = f"{FLAGS.env_name}-proxy.pkl"
     with open(formatted_filename, 'wb') as f:
         pickle.dump(formatted_dataset, f)
     
