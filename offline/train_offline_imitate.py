@@ -1,5 +1,6 @@
 import os
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
+os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
 from typing import Tuple
 import datetime
 import gym
@@ -16,7 +17,8 @@ from evaluation import evaluate, evaluate_ant
 from learner_imitate import Learner, compute_rewards
 from logging_utils.logx import EpochLogger
 from common import Batch, MixedBatch
-
+from tensorboardX import SummaryWriter
+import sys
 
 FLAGS = flags.FLAGS
 
@@ -314,7 +316,14 @@ def main(_):
     logger_kwargs={'output_dir':log_folder, 'exp_name':FLAGS.exp_name}
     e_logger = EpochLogger(**logger_kwargs)
 
-
+    hparam_str_dict = dict(seed=FLAGS.seed, env=FLAGS.env_name)
+    hparam_str = ','.join([
+        '%s=%s' % (k, str(hparam_str_dict[k]))
+        for k in sorted(hparam_str_dict.keys())
+    ])
+    summary_writer = SummaryWriter(os.path.join(save_dir, 'tb',
+                                                hparam_str),
+                                   write_to_disk=True)
     os.makedirs(save_dir, exist_ok=True)
 
     env, dataset, expert_dataset, offline_min, offline_max = make_env_and_dataset(FLAGS.env_name, FLAGS.seed)
@@ -353,11 +362,16 @@ def main(_):
                 eval_stats = evaluate_ant(agent, env, FLAGS.eval_episodes, offline_min, offline_max)
             else:    
                 eval_stats = evaluate(agent, env, FLAGS.eval_episodes)
+                
+            for k, v in eval_stats.items():
+                summary_writer.add_scalar(f'evaluation/average_{k}s', v, i)
+            summary_writer.flush()
 
             if eval_stats['return'] >= best_eval_returns:
                 # Store best eval returns
                 best_eval_returns = eval_stats['return']
                 agent.save(os.path.join(save_dir, f'{FLAGS.seed}', f'best'))
+            summary_writer.add_scalar('evaluation/best_returns', best_eval_returns, i)
             e_logger.log_tabular('Iterations', i)
             e_logger.log_tabular('AverageNormalizedReturn', eval_stats['return'])
             e_logger.log_tabular('UnseenExpertV', update_info['unseen_v_expert'].item())
@@ -376,7 +390,7 @@ def main(_):
     modified_dataset = process_dataset_with_learned_rewards(dataset, agent, FLAGS.batch_size)
     
     # Sample statistics about the learned rewards
-    print(f"Learned rewards statistics:")
+    print("Learned rewards statistics:")
     print(f"  Min: {modified_dataset['rewards'].min()}")
     print(f"  Max: {modified_dataset['rewards'].max()}")
     print(f"  Mean: {modified_dataset['rewards'].mean()}")
@@ -391,6 +405,8 @@ def main(_):
         pickle.dump(formatted_dataset, f)
     
     print(f"Formatted dataset saved to {formatted_filename}")
+    sys.exit(0)
+
 
 if __name__ == '__main__':
     app.run(main)
