@@ -400,7 +400,10 @@ def main(_):
     formatted_dataset = format_dataset_as_trajectories(modified_dataset)
     
     # Save the formatted dataset
-    formatted_filename = f"{FLAGS.env_name}-proxy.pkl"
+    if FLAGS.expert_trajectories == 20:
+        formatted_filename = f"{FLAGS.env_name}-few-expert-proxy.pkl"
+    else:
+        formatted_filename = f"{FLAGS.env_name}-expert-proxy.pkl"
     with open(formatted_filename, 'wb') as f:
         pickle.dump(formatted_dataset, f)
     
