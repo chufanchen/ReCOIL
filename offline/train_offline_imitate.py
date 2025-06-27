@@ -12,13 +12,17 @@ from absl import app, flags
 from ml_collections import config_flags
 from dataclasses import dataclass
 import wrappers
-from dataset_utils import D4RLDataset, D4RLMixedDataset, split_into_trajectories
+from dataset_utils import D4RLDataset, D4RLMixedDataset, split_into_trajectories_with_rewards, split_into_trajectories
 from evaluation import evaluate, evaluate_ant
 from learner_imitate import Learner, compute_rewards
 from logging_utils.logx import EpochLogger
 from common import Batch, MixedBatch
 from tensorboardX import SummaryWriter
 import sys
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import pearsonr
+import tqdm
 
 FLAGS = flags.FLAGS
 
@@ -47,6 +51,8 @@ flags.DEFINE_float('beta', 0.1, 'imitation strength vs bellman strength')
 
 flags.DEFINE_boolean('noise', False, 'Add noise to actions')
 flags.DEFINE_float('noise_std', 0.1, 'Noise std for actions')
+flags.DEFINE_string('load_path', None, 'Path to load the model from')
+flags.DEFINE_boolean('recover_reward_only', False, 'Only recover the reward function')
 
 config_flags.DEFINE_config_file(
     'config',
@@ -210,19 +216,19 @@ def process_dataset_with_learned_rewards(dataset, agent, batch_size=1024):
     dataset_dict = {
         'observations': dataset.observations.copy(),
         'actions': dataset.actions.copy(),
-        'rewards': np.zeros_like(dataset.rewards),  # Will replace with learned rewards
-        'masks': dataset.masks.copy(),
+        'rewards': dataset.rewards.copy(),  # Keep original rewards
+        'learned_rewards': np.zeros_like(dataset.rewards),  # Add learned rewards
         'dones_float': dataset.dones_float.copy(),
-        'next_observations': dataset.next_observations.copy()
+        'masks': dataset.masks.copy(),
+        'next_observations': dataset.next_observations.copy(),
+        'is_expert': dataset.is_expert.copy()
     }
     
     total_entries = len(dataset.observations)
     num_batches = (total_entries + batch_size - 1) // batch_size  # Ceiling division
     
-    print(f"Processing dataset with {total_entries} entries in {num_batches} batches...")
-    
     # Process the dataset sequentially in batches
-    for i in range(num_batches):
+    for i in tqdm.trange(num_batches):
         start_idx = i * batch_size
         end_idx = min(start_idx + batch_size, total_entries)
         
@@ -249,13 +255,73 @@ def process_dataset_with_learned_rewards(dataset, agent, batch_size=1024):
         learned_batch_rewards = compute_rewards(agent, batch)
         
         # Store the learned rewards
-        dataset_dict['rewards'][start_idx:end_idx] = learned_batch_rewards
-        
-        if (i + 1) % 10 == 0 or i == num_batches - 1:
-            print(f"Processed batch {i+1}/{num_batches}")
+        dataset_dict['learned_rewards'][start_idx:end_idx] = learned_batch_rewards
     
     return dataset_dict
 
+
+def analyze_rewards_correlation(dataset_dict, save_dir):
+    """Analyze correlation between ground truth and learned reward returns at trajectory level."""
+    
+    # split the dataset into trajectories
+    trajectories = split_into_trajectories_with_rewards(dataset_dict['observations'], dataset_dict['actions'],
+                                          dataset_dict['rewards'], dataset_dict['masks'],
+                                          dataset_dict['dones_float'],
+                                          dataset_dict['next_observations'])
+    learned_trajectories = split_into_trajectories_with_rewards(dataset_dict['observations'], dataset_dict['actions'],
+                                          dataset_dict['learned_rewards'], dataset_dict['masks'],
+                                          dataset_dict['dones_float'],
+                                          dataset_dict['next_observations'])
+    # calculate the returns of each trajectory
+    gt_returns = [sum(traj) for traj in trajectories]
+    learned_returns = [sum(traj) for traj in learned_trajectories]
+    part_gt_returns = [np.cumsum(traj) for traj in trajectories]
+    part_learned_returns = [np.cumsum(traj) for traj in learned_trajectories]
+    # Calculate Pearson correlation
+    correlation, p_value = pearsonr(gt_returns, learned_returns)
+    print(f"\nPearson correlation between ground truth and learned trajectory returns: {correlation:.4f} (p-value: {p_value:.4e})")
+    print(f"Number of trajectories analyzed: {len(gt_returns)}")
+    
+    sns.set()
+    plt.figure(dpi=150)
+    plt.scatter(gt_returns, learned_returns, s=10, alpha=0.8)
+    plt.xlabel('GT Returns')
+    plt.ylabel('Recovered Returns')
+    plt.title(f'Episode rewards\nPearson Correlation: {correlation:.4f}')
+    plt.savefig(os.path.join(save_dir, 'Episode rewards.png'))
+    plt.close()
+    
+    sns.set()
+    plt.figure(dpi=150)
+    for i in range(20):
+        plt.scatter(part_gt_returns[i], part_learned_returns[i], s=5, alpha=0.6)
+    plt.xlabel('Env rewards')
+    plt.ylabel('Recovered rewards')
+
+    plt.savefig(os.path.join(save_dir, 'Partial rewards.png'))
+    plt.close()
+
+    sns.set()
+    plt.figure(dpi=150)
+    for i in range(20):
+        plt.plot(part_gt_returns[i], part_learned_returns[i], markersize=1, alpha=0.8)
+    plt.xlabel('Env rewards')
+    plt.ylabel('Recovered rewards')
+
+    plt.savefig(os.path.join(save_dir, 'Partial rewards - Interplolate.png'))
+    plt.close()
+
+    sns.set()
+    plt.figure(dpi=150)
+    for i in range(5):
+        plt.scatter(dataset_dict['rewards'][i], dataset_dict['learned_rewards'][i], s=5, alpha=0.5)
+    plt.xlabel('Env rewards')
+    plt.ylabel('Recovered rewards')
+
+    plt.savefig(os.path.join(save_dir, 'Step rewards.png'))
+    plt.close()
+    
+    return correlation, p_value
 
 def format_dataset_as_trajectories(dataset_dict):
     """Format the dataset into a list of trajectories (episodes)."""
@@ -274,8 +340,12 @@ def format_dataset_as_trajectories(dataset_dict):
         done_bool = bool(terminals[i])
         final_timestep = False  # We don't have timeout info, using only terminal flags
         
-        for k in ['observations', 'actions', 'rewards']:
-            data_[k].append(dataset_dict[k][i])
+        for k in ['observations', 'actions', 'learned_rewards']:
+            if k == 'learned_rewards':
+                # Save learned rewards as 'rewards' in the output
+                data_['rewards'].append(dataset_dict[k][i])
+            else:
+                data_[k].append(dataset_dict[k][i])
         
         # Add terminal flag
         data_['terminals'].append(terminals[i])
@@ -349,65 +419,87 @@ def main(_):
                      beta = FLAGS.beta,
                     args=args,
                     **kwargs)
+    if FLAGS.load_path is not None:
+        agent.load(FLAGS.load_path)
 
-    best_eval_returns = -np.inf
-    eval_returns = []
-    for i in range(1, FLAGS.max_steps + 1): # Remove TQDM
-        batch = dataset.sample(FLAGS.batch_size)
-        expert_batch = expert_dataset.sample(FLAGS.batch_size)
-        update_info = agent.update(batch, expert_batch)
+    if not FLAGS.recover_reward_only:
+        print("Training the agent...")
+        best_eval_returns = -np.inf
+        eval_returns = []
+        for i in range(1, FLAGS.max_steps + 1): # Remove TQDM
+            batch = dataset.sample(FLAGS.batch_size)
+            expert_batch = expert_dataset.sample(FLAGS.batch_size)
+            update_info = agent.update(batch, expert_batch)
 
-        if i % FLAGS.eval_interval == 0:
-            if 'antmaze' in FLAGS.env_name:
-                eval_stats = evaluate_ant(agent, env, FLAGS.eval_episodes, offline_min, offline_max)
-            else:    
-                eval_stats = evaluate(agent, env, FLAGS.eval_episodes)
-                
-            for k, v in eval_stats.items():
-                summary_writer.add_scalar(f'evaluation/average_{k}s', v, i)
-            summary_writer.flush()
+            if i % FLAGS.eval_interval == 0:
+                if 'antmaze' in FLAGS.env_name:
+                    eval_stats = evaluate_ant(agent, env, FLAGS.eval_episodes, offline_min, offline_max)
+                else:    
+                    eval_stats = evaluate(agent, env, FLAGS.eval_episodes)
+                    
+                for k, v in eval_stats.items():
+                    summary_writer.add_scalar(f'evaluation/average_{k}s', v, i)
+                summary_writer.flush()
 
-            if eval_stats['return'] >= best_eval_returns:
-                # Store best eval returns
-                best_eval_returns = eval_stats['return']
-                agent.save(os.path.join(save_dir, f'{FLAGS.seed}', f'best'))
-            summary_writer.add_scalar('evaluation/best_returns', best_eval_returns, i)
-            e_logger.log_tabular('Iterations', i)
-            e_logger.log_tabular('AverageNormalizedReturn', eval_stats['return'])
-            e_logger.log_tabular('UnseenExpertV', update_info['unseen_v_expert'].item())
-            e_logger.log_tabular('UnseenRandomV', update_info['unseen_v_suboptimal'].item())
-            e_logger.log_tabular('UnseenExpertQ', update_info['unseen_q_expert'].item())
-            e_logger.log_tabular('UnseenRandomQ', update_info['unseen_q_suboptimal'].item())
-            e_logger.log_tabular('ClippedAdv', update_info['clipped_adv'].mean().item())
-            e_logger.dump_tabular()
-            eval_returns.append((i, eval_stats['return']))
-            print("Iterations: {} Average Return: {}".format(i,eval_stats['return']))
+                if eval_stats['return'] >= best_eval_returns:
+                    # Store best eval returns
+                    best_eval_returns = eval_stats['return']
+                    agent.save(os.path.join(save_dir, f'{FLAGS.seed}', f'best'))
+                summary_writer.add_scalar('evaluation/best_returns', best_eval_returns, i)
+                e_logger.log_tabular('Iterations', i)
+                e_logger.log_tabular('AverageNormalizedReturn', eval_stats['return'])
+                e_logger.log_tabular('UnseenExpertV', update_info['unseen_v_expert'].item())
+                e_logger.log_tabular('UnseenRandomV', update_info['unseen_v_suboptimal'].item())
+                e_logger.log_tabular('UnseenExpertQ', update_info['unseen_q_expert'].item())
+                e_logger.log_tabular('UnseenRandomQ', update_info['unseen_q_suboptimal'].item())
+                e_logger.log_tabular('ClippedAdv', update_info['clipped_adv'].mean().item())
+                e_logger.dump_tabular()
+                eval_returns.append((i, eval_stats['return']))
+                print("Iterations: {} Average Return: {}".format(i,eval_stats['return']))
 
-    print(f"Training finished. Best eval return: {best_eval_returns}")
-    print("Computing learned rewards and replacing the ground truth rewards in the D4RL dataset...")
-    
-    # Process the entire dataset with learned rewards
-    modified_dataset = process_dataset_with_learned_rewards(dataset, agent, FLAGS.batch_size)
-    
-    # Sample statistics about the learned rewards
-    print("Learned rewards statistics:")
-    print(f"  Min: {modified_dataset['rewards'].min()}")
-    print(f"  Max: {modified_dataset['rewards'].max()}")
-    print(f"  Mean: {modified_dataset['rewards'].mean()}")
-    print(f"  Std: {modified_dataset['rewards'].std()}")
-
-    # Format the dataset as trajectories
-    formatted_dataset = format_dataset_as_trajectories(modified_dataset)
-    
-    # Save the formatted dataset
-    if FLAGS.expert_trajectories == 20:
-        formatted_filename = f"{FLAGS.env_name}-few-expert-proxy.pkl"
+        print(f"Training finished. Best eval return: {best_eval_returns}")
     else:
-        formatted_filename = f"{FLAGS.env_name}-expert-proxy.pkl"
-    with open(formatted_filename, 'wb') as f:
-        pickle.dump(formatted_dataset, f)
-    
-    print(f"Formatted dataset saved to {formatted_filename}")
+        print("Computing learned rewards and replacing the ground truth rewards in the D4RL dataset...")
+        
+        # Process the entire dataset with learned rewards
+        modified_dataset = process_dataset_with_learned_rewards(dataset, agent, FLAGS.batch_size)
+        
+        # Compute correlation and create visualization
+        correlation, p_value = analyze_rewards_correlation(modified_dataset, save_dir)
+        
+        # Add correlation to TensorBoard
+        summary_writer.add_scalar('rewards/pearson_correlation', correlation, 0)
+        summary_writer.flush()
+        
+        # Sample statistics about the learned rewards
+        print("Learned rewards statistics:")
+        print(f"  Min: {modified_dataset['learned_rewards'].min()}")
+        print(f"  Max: {modified_dataset['learned_rewards'].max()}")
+        print(f"  Mean: {modified_dataset['learned_rewards'].mean()}")
+        print(f"  Std: {modified_dataset['learned_rewards'].std()}")
+
+        # Format the dataset as trajectories
+        formatted_dataset = format_dataset_as_trajectories(modified_dataset)
+        
+        # Save the formatted dataset
+        if FLAGS.expert_trajectories == 20:
+            formatted_filename = f"{FLAGS.env_name}-few-expert-proxy.pkl"
+        else:
+            formatted_filename = f"{FLAGS.env_name}-expert-proxy.pkl"
+        with open(formatted_filename, 'wb') as f:
+            pickle.dump(formatted_dataset, f)
+        
+        # Also save the raw rewards for further analysis
+        reward_data = {
+            'ground_truth': modified_dataset['rewards'],
+            'learned': modified_dataset['learned_rewards']
+        }
+        rewards_filename = f"{FLAGS.env_name}_proxy_reward.pkl"
+        with open(rewards_filename, 'wb') as f:
+            pickle.dump(reward_data, f)
+        
+        print(f"Formatted dataset saved to {formatted_filename}")
+        print(f"Raw reward data saved to {rewards_filename}")
     sys.exit(0)
 
 

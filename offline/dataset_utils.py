@@ -16,8 +16,16 @@ MixedBatch = collections.namedtuple(
     'MixedBatch',
     ['observations', 'actions', 'rewards', 'masks', 'next_observations','is_expert'])
 
-
-
+def split_into_trajectories_with_rewards(observations, actions, rewards, masks, dones_float,
+                            next_observations):
+    trajs = []
+    traj = []
+    for i in tqdm(range(len(observations))):
+        traj.append(rewards[i])
+        if dones_float[i] == 1.0 and i + 1 < len(observations):
+            trajs.append(traj)
+            traj = []
+    return trajs
 
 def split_into_trajectories(observations, actions, rewards, masks, dones_float,
                             next_observations):

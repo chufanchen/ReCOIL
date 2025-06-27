@@ -18,7 +18,7 @@ from functools import partial
 
 
 def target_update(critic: Model, target_critic: Model, tau: float) -> Model:
-    new_target_params = jax.tree_map(
+    new_target_params = jax.tree_util.tree_map(
         lambda p, tp: p * tau + tp * (1 - tau), critic.params,
         target_critic.params)
 
@@ -64,45 +64,25 @@ def compute_rewards(agent, batch: Batch, num_samples: int = 10) -> jnp.ndarray:
     def _get_rewards(
         actor_params: jnp.ndarray,
         critic_params: jnp.ndarray,
-        rng: PRNGKey,
+        value_params: jnp.ndarray,
         observations: jnp.ndarray,
         actions: jnp.ndarray,
         next_observations: jnp.ndarray,
-    ) -> Tuple[jnp.ndarray, PRNGKey]:
+        masks: jnp.ndarray,
+    ) -> jnp.ndarray:
         # Compute Q(s, a)
         q1_s_a, q2_s_a = agent.critic.apply_fn.apply({'params': critic_params}, observations, actions)
         q_s_a = jnp.minimum(q1_s_a, q2_s_a)
 
-        # Compute E[Q(s', a')]
-        dist = agent.actor.apply_fn.apply({'params': actor_params}, next_observations)
-        rng, key = jax.random.split(rng)
-        
-        # Sample multiple actions for each next_observation
-        a_primes = dist.sample(seed=key, sample_shape=num_samples)  # (num_samples, batch_size, action_dim)
+        next_v = agent.value.apply_fn.apply({'params': value_params}, next_observations)
+        rewards = q_s_a - masks * agent.discount * next_v
 
-        # Reshape for batch computation
-        batch_size = next_observations.shape[0]
-        action_dim = a_primes.shape[-1]
-        obs_dim = next_observations.shape[-1]
-        
-        s_prime_tiled = jnp.tile(next_observations, (num_samples, 1)) # (num_samples * batch_size, obs_dim)
-        a_primes_reshaped = jnp.reshape(a_primes, (num_samples * batch_size, action_dim))
+        return rewards
 
-        q1_s_prime, q2_s_prime = agent.critic.apply_fn.apply({'params': critic_params}, s_prime_tiled, a_primes_reshaped)
-        q_s_prime = jnp.minimum(q1_s_prime, q2_s_prime)
-        
-        q_s_prime_reshaped = q_s_prime.reshape(num_samples, batch_size)
-        expected_q = q_s_prime_reshaped.mean(axis=0)
-
-        rewards = q_s_a - agent.discount * expected_q
-
-        return rewards, rng
-
-    rewards, new_rng = _get_rewards(
-        agent.actor.params, agent.critic.params, agent.rng,
-        batch.observations, batch.actions, batch.next_observations
+    rewards = _get_rewards(
+        agent.actor.params, agent.critic.params, agent.value.params,
+        batch.observations, batch.actions, batch.next_observations, batch.masks
     )
-    agent.rng = new_rng
     return rewards
 
 
